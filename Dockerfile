@@ -20,25 +20,52 @@ ARG GCC_VERSION=16.1.0
 # GCC needs to find the i686-elf assembler/linker that Binutils installs.
 ENV PATH="${PREFIX}/bin:${PATH}"
 
-# Build dependencies for the OSDev GCC cross-compiler guide:
+# Build and test dependencies for the OSDev Bare Bones guide:
 # - build-essential gives us the host C/C++ compiler and make.
 # - bison/flex are parser-generator tools used by GNU projects.
 # - GMP, MPFR, MPC, and optional ISL are math libraries GCC uses internally.
 # - wget, ca-certificates, and xz-utils let us fetch and unpack source tarballs.
+# - grub-common provides grub-file and grub-mkrescue.
+# - xorriso is the ISO builder backend that grub-mkrescue invokes.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
     bison \
     build-essential \
     ca-certificates \
     flex \
+    grub-common \
     libgmp3-dev \
     libisl-dev \
     libmpc-dev \
     libmpfr-dev \
     texinfo \
     wget \
+    xorriso \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# grub-mkrescue also needs GRUB's BIOS/i386-pc modules to create the bootable
+# ISO used by the OSDev tutorial. Debian packages those modules as grub-pc-bin.
+# That package is directly installable on x86 hosts. On non-x86 hosts, such as
+# ARM64 Docker on Apple Silicon, the modules are still usable target files, but
+# the package is not installable as a native package; download the amd64 package
+# and extract just /usr/lib/grub/i386-pc.
+RUN set -eux; \
+    host_arch="$(dpkg --print-architecture)"; \
+    if [ "$host_arch" = "amd64" ] || [ "$host_arch" = "i386" ]; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends grub-pc-bin; \
+    else \
+        dpkg --add-architecture amd64; \
+        apt-get update; \
+        cd /tmp; \
+        apt-get download grub-pc-bin:amd64; \
+        mkdir -p /tmp/grub-pc-bin /usr/lib/grub; \
+        dpkg-deb -x /tmp/grub-pc-bin_*_amd64.deb /tmp/grub-pc-bin; \
+        cp -a /tmp/grub-pc-bin/usr/lib/grub/i386-pc /usr/lib/grub/; \
+        rm -rf /tmp/grub-pc-bin /tmp/grub-pc-bin_*_amd64.deb; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
 
 # Build from /tmp/src so source trees and intermediate object files can be
 # deleted after installation. Keeping source and build directories separate is
