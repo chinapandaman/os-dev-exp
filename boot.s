@@ -1,16 +1,29 @@
-/* Declare constants for the multiboot header. */
-.set ALIGN,    1<<0             /* align loaded modules on page boundaries */
-.set MEMINFO,  1<<1             /* provide memory map */
-.set FLAGS,    ALIGN | MEMINFO  /* this is the Multiboot 'flag' field */
-.set MAGIC,    0x1BADB002       /* 'magic number' lets bootloader find the header */
-.set CHECKSUM, -(MAGIC + FLAGS) /* checksum of above, to prove we are multiboot */
+/*
+This file is the small assembly bridge between GRUB and the C kernel.
 
-/* 
-Declare a multiboot header that marks the program as a kernel. These are magic
-values that are documented in the multiboot standard. The bootloader will
-search for this signature in the first 8 KiB of the kernel file, aligned at a
-32-bit boundary. The signature is in its own section so the header can be
-forced to be within the first 8 KiB of the kernel file.
+GRUB does not know that this file is a kernel just because it is named
+boot.s. It recognizes a kernel by finding a Multiboot header: three 32-bit
+numbers placed near the beginning of the final kernel binary.
+
+.set creates assembler-time constants. These names do not become variables in
+memory; they are just readable names for the numbers used below.
+*/
+.set ALIGN,    1<<0             /* ask GRUB to page-align loaded modules */
+.set MEMINFO,  1<<1             /* ask GRUB to provide memory information */
+.set FLAGS,    ALIGN | MEMINFO  /* combine the Multiboot options above */
+.set MAGIC,    0x1BADB002       /* value GRUB searches for */
+.set CHECKSUM, -(MAGIC + FLAGS) /* makes MAGIC + FLAGS + CHECKSUM equal 0 */
+
+/*
+This is the Multiboot header itself.
+
+GRUB searches the first 8 KiB of the kernel file for MAGIC on a 4-byte
+boundary. When it finds MAGIC, it reads the next two 32-bit values as FLAGS
+and CHECKSUM. The checksum is a simple guard against finding the magic value
+by accident: all three numbers must add up to 0.
+
+The header has its own section so the linker script can keep it near the
+front of the kernel file, where GRUB is able to find it.
 */
 .section .multiboot
 .align 4
@@ -19,91 +32,97 @@ forced to be within the first 8 KiB of the kernel file.
 .long CHECKSUM
 
 /*
-The multiboot standard does not define the value of the stack pointer register
-(esp) and it is up to the kernel to provide a stack. This allocates room for a
-small stack by creating a symbol at the bottom of it, then allocating 16384
-bytes for it, and finally creating a symbol at the top. The stack grows
-downwards on x86. The stack is in its own section so it can be marked nobits,
-which means the kernel file is smaller because it does not contain an
-uninitialized stack. The stack on x86 must be 16-byte aligned according to the
-System V ABI standard and de-facto extensions. The compiler will assume the
-stack is properly aligned and failure to align the stack will result in
-undefined behavior.
+Before C code can run, the CPU needs a stack.
+
+GRUB jumps to our entry point with no stack set up for us. C functions use the
+stack for return addresses, local variables, saved registers, and arguments,
+so this file reserves a small stack in the kernel's .bss section.
+
+.bss is for zero-initialized or uninitialized memory. The reserved stack space
+exists when the kernel is loaded, but it does not need to take up bytes in the
+kernel file on disk.
+
+x86 stacks grow downward: pushing data subtracts from %esp. That is why the
+first label is stack_bottom, the .skip reserves 16 KiB, and the second label is
+stack_top. We will initialize %esp to stack_top before calling C.
+
+The stack is aligned to 16 bytes because compiled C code may assume that
+alignment when following the platform ABI.
 */
 .section .bss
 .align 16
 stack_bottom:
-.skip 16384 # 16 KiB
+.skip 16384 # reserve 16 KiB for the early kernel stack
 stack_top:
 
 /*
-The linker script specifies _start as the entry point to the kernel and the
-bootloader will jump to this position once the kernel has been loaded. It
-doesn't make sense to return from this function as the bootloader is gone.
+Code begins in the .text section.
+
+The linker script names _start as the kernel entry point. After GRUB loads the
+kernel, it jumps here. There is no caller to return to in the usual function
+sense; once control reaches _start, the kernel owns the machine.
 */
 .section .text
 .global _start
 .type _start, @function
 _start:
 	/*
-	The bootloader has loaded us into 32-bit protected mode on a x86
-	machine. Interrupts are disabled. Paging is disabled. The processor
-	state is as defined in the multiboot standard. The kernel has full
-	control of the CPU. The kernel can only make use of hardware features
-	and any code it provides as part of itself. There's no printf
-	function, unless the kernel provides its own <stdio.h> header and a
-	printf implementation. There are no security restrictions, no
-	safeguards, no debugging mechanisms, only what the kernel provides
-	itself. It has absolute and complete power over the
-	machine.
+	At this point GRUB has already done the earliest boot work:
+	- the CPU is in 32-bit protected mode,
+	- interrupts are disabled,
+	- paging is disabled,
+	- the machine state follows the Multiboot specification.
+
+	What we do not have yet is an operating-system environment. There is no
+	standard library, no printf, no heap, no files, no processes, and no
+	automatic safety net. The kernel can only use the CPU, the hardware,
+	and code that it provides for itself.
 	*/
 
 	/*
-	To set up a stack, we set the esp register to point to the top of the
-	stack (as it grows downwards on x86 systems). This is necessarily done
-	in assembly as languages such as C cannot function without a stack.
+	Point the CPU's stack pointer at the top of the stack reserved above.
+	Because the stack grows downward, the first push will use memory just
+	below stack_top.
 	*/
 	mov $stack_top, %esp
 
 	/*
-	This is a good place to initialize crucial processor state before the
-	high-level kernel is entered. It's best to minimize the early
-	environment where crucial features are offline. Note that the
-	processor is not fully initialized yet: Features such as floating
-	point instructions and instruction set extensions are not initialized
-	yet. The GDT should be loaded here. Paging should be enabled here.
-	C++ features such as global constructors and exceptions will require
-	runtime support to work as well.
+	This minimal tutorial does not need more CPU setup before C runs.
+
+	As the kernel grows, this spot is where very early setup often goes:
+	loading your own GDT, enabling paging, preparing interrupt handling,
+	initializing CPU features, or calling C++ runtime support before
+	entering C++ code.
 	*/
 
 	/*
-	Enter the high-level kernel. The ABI requires the stack is 16-byte
-	aligned at the time of the call instruction (which afterwards pushes
-	the return pointer of size 4 bytes). The stack was originally 16-byte
-	aligned above and we've pushed a multiple of 16 bytes to the
-	stack since (pushed 0 bytes so far), so the alignment has thus been
-	preserved and the call is well defined.
+	Enter the C part of the kernel.
+
+	kernel_main is expected to be defined in kernel.c. The call instruction
+	pushes a return address onto the stack and jumps to kernel_main, just
+	like an ordinary function call. The stack is still 16-byte aligned here,
+	which keeps the call compatible with the ABI expected by the compiler.
 	*/
 	call kernel_main
 
 	/*
-	If the system has nothing more to do, put the computer into an
-	infinite loop. To do that:
-	1) Disable interrupts with cli (clear interrupt enable in eflags).
-	   They are already disabled by the bootloader, so this is not needed.
-	   Mind that you might later enable interrupts and return from
-	   kernel_main (which is sort of nonsensical to do).
-	2) Wait for the next interrupt to arrive with hlt (halt instruction).
-	   Since they are disabled, this will lock up the computer.
-	3) Jump to the hlt instruction if it ever wakes up due to a
-	   non-maskable interrupt occurring or due to system management mode.
+	kernel_main normally should not return. If it does, there is nowhere
+	useful to go, so stop the CPU in a quiet infinite loop.
+
+	cli clears the interrupt-enable flag, so ordinary hardware interrupts
+	will not wake the CPU. hlt then halts the CPU until something wakes it.
+	If a non-maskable event does wake it, jmp 1b sends execution back to the
+	local label "1" and halts again.
 	*/
 	cli
 1:	hlt
 	jmp 1b
 
 /*
-Set the size of the _start symbol to the current location '.' minus its start.
-This is useful when debugging or when you implement call tracing.
+Tell the assembler how many bytes belong to the _start function.
+
+"." means the current location. Subtracting _start gives the size of the code
+from the _start label to this point. Debuggers and other tools can use this
+symbol-size information.
 */
 .size _start, . - _start
