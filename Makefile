@@ -5,7 +5,7 @@ IMAGE ?= os-dev-exp
 build-image:
 	docker build -t $(IMAGE) .
 
-dev-shell: build-image
+dev-shell:
 	docker run --rm -it \
 		-v "$(CURDIR):/workspace" \
 		-w /workspace \
